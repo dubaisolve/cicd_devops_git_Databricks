@@ -1,0 +1,62 @@
+parameters:
+  - name: stageld
+    type: string
+  - name: dependson
+    type: object
+    default: []
+  - name: env
+    type: string
+  - name: environmentName
+    type: string
+  - name: resourceGroupName
+    type: string
+  - name: serviceconnection
+    type: string
+  - name: notebooksPath
+    type: string
+
+stages:
+  - stage: "${{ parameters.stageld }}"
+    displayName: "Deploying to ${{ upper(parameters.env) }}"
+    dependsOn: ${{ parameters.dependson }}
+    jobs:
+      - deployment: Deploy
+        displayName: "Deploying Databricks Notebooks"
+        environment: ${{ parameters.environmentName }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+              - checkout: self
+              - task: AzureCLI@2
+                inputs:
+                  azuresubscription: ${{ parameters.serviceconnection }}
+                  scriptType: "pscore"
+                  scriptLocation: "inlineScript"
+                  inlineScript: |
+                    az config set extension.use_dynamic_install=yes_without_prompt
+                    $databricksWorkspaces = az resource list --resource-group ${{ parameters.resourceGroupName }} --query "[?type=='Microsoft.Databricks/workspaces']" | ConvertFrom-Json
+                    Write-Output "Workspaces: $($databricksWorkspaces | ConvertTo-Json)"
+                    
+                    if ($databricksWorkspaces -and $databricksWorkspaces.Count -gt 0) {
+                        $databricksWorkspace = $databricksWorkspaces[0]
+                        Write-Output "Selected Workspace: $($databricksWorkspace | ConvertTo-Json)"
+                    } else {
+                        Write-Error "No Databricks workspaces found in the specified resource group."
+                        exit 1
+                    }
+
+                    $databricksWorkspaceInfo = (az databricks workspace show --ids $databricksWorkspace.id | ConvertFrom-Json)
+                    Write-Output "Workspace Info: $($databricksWorkspaceInfo | ConvertTo-Json)"
+
+                    if (-not $databricksWorkspaceInfo.id) {
+                        Write-Error "Workspace ID is null or empty."
+                        exit 1
+                    }
+
+                    $bearerToken = & "$(Build.Repository.LocalPath)/CICD/scripts/DatabricksToken.ps1" -databricksWorkspaceResourceId $databricksWorkspaceInfo.id -databricksWorkspaceUrl $databricksWorkspaceInfo.workspaceUrl
+                    Write-Output "Bearer Token: $bearerToken"
+                    
+                    Install-Module -Name azure.databricks.cicd.tools -Force -Scope CurrentUser
+                    Import-Module -Name azure.databricks.cicd.tools
+                    Import-DatabricksFolder -BearerToken $bearerToken -Region $databricksWorkspaceInfo.location -LocalPath "$(Build.Repository.LocalPath)/${{ parameters.notebooksPath }}" -DatabricksPath '/live' -Clean
